@@ -10,7 +10,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use futures::Stream;
-use rp2040_pac as pac;
+use rp235x_pac as pac;
 use rtic_common::waker_registration::CriticalSectionWakerRegistration;
 
 /// Data shared between interrupt handler and thread-mode code
@@ -22,12 +22,12 @@ pub struct UsbShared {
 impl UsbShared {
     /// IRQ handler
     pub fn on_irq(&self) {
-        let regs = unsafe { pac::USBCTRL_REGS::steal() };
+        let regs = unsafe { pac::USB::steal() };
         let ints = regs.ints().read();
         /*defmt::info!(
                     "IRQ ints={:x} inte={:x}",
                     ints.bits(),
-            regs.inte().read().bits()
+            regs.inte().read().bits()   
         );*/
 
         if ints.buff_status().bit() {
@@ -132,7 +132,7 @@ impl Stream for Rp2040DeviceDetect {
         //defmt::trace!("DE register");
         self.waker.register(cx.waker());
 
-        let regs = unsafe { pac::USBCTRL_REGS::steal() };
+        let regs = unsafe { pac::USB::steal() };
         let status = regs.sie_status().read();
         let device_status = match status.speed().bits() {
             0 => DeviceStatus::Absent,
@@ -174,13 +174,13 @@ impl<'a> Rp2040ControlEndpoint<'a> {
 }
 
 impl Future for Rp2040ControlEndpoint<'_> {
-    type Output = pac::usbctrl_regs::sie_status::R;
+    type Output = pac::usb::sie_status::R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         //defmt::trace!("CE register");
         self.waker.register(cx.waker());
 
-        let regs = unsafe { pac::USBCTRL_REGS::steal() };
+        let regs = unsafe { pac::USB::steal() };
         let status = regs.sie_status().read();
         let intr = regs.intr().read();
         let bcsh = regs.buff_cpu_should_handle().read();
@@ -300,8 +300,8 @@ impl Rp2040InterruptPipe {
     }
 
     fn poll(&self) -> Option<InterruptPacket> {
-        let dpram = unsafe { pac::USBCTRL_DPRAM::steal() };
-        let regs = unsafe { pac::USBCTRL_REGS::steal() };
+        let dpram = unsafe { pac::USB_DPRAM::steal() };
+        let regs = unsafe { pac::USB::steal() };
         let which = self.pipe.which();
         let bc = dpram.ep_buffer_control((which * 2) as usize).read();
         if bc.full_0().bit() {
@@ -389,7 +389,7 @@ enum ZeroLengthPacket {
 }
 
 trait Packetiser {
-    fn prepare(&mut self, reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL)
+    fn prepare(&mut self, reg: &pac::usb_dpram::EP_BUFFER_CONTROL)
         -> bool;
 }
 
@@ -442,7 +442,7 @@ impl InPacketiser {
 impl Packetiser for InPacketiser {
     fn prepare(
         &mut self,
-        reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL,
+        reg: &pac::usb_dpram::EP_BUFFER_CONTROL,
     ) -> bool {
         let val = reg.read();
         match self.next_prep {
@@ -550,7 +550,7 @@ impl<'a> OutPacketiser<'a> {
 impl Packetiser for OutPacketiser<'_> {
     fn prepare(
         &mut self,
-        reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL,
+        reg: &pac::usb_dpram::EP_BUFFER_CONTROL,
     ) -> bool {
         let val = reg.read();
         match self.next_prep {
@@ -633,7 +633,7 @@ impl Packetiser for OutPacketiser<'_> {
 }
 
 trait Depacketiser {
-    fn retire(&mut self, reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL) -> bool;
+    fn retire(&mut self, reg: &pac::usb_dpram::EP_BUFFER_CONTROL) -> bool;
 }
 
 struct InDepacketiser<'a> {
@@ -661,7 +661,7 @@ impl<'a> InDepacketiser<'a> {
 }
 
 impl Depacketiser for InDepacketiser<'_> {
-    fn retire(&mut self, reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL) -> bool {
+    fn retire(&mut self, reg: &pac::usb_dpram::EP_BUFFER_CONTROL) -> bool {
         let val = reg.read();
         match self.next_retire {
             0 => {
@@ -740,7 +740,7 @@ impl OutDepacketiser {
 }
 
 impl Depacketiser for OutDepacketiser {
-    fn retire(&mut self, reg: &pac::usbctrl_dpram::EP_BUFFER_CONTROL) -> bool {
+    fn retire(&mut self, reg: &pac::usb_dpram::EP_BUFFER_CONTROL) -> bool {
         let val = reg.read();
         match self.next_retire {
             0 => {
@@ -768,8 +768,8 @@ impl Depacketiser for OutDepacketiser {
 pub struct Rp2040HostController {
     shared: &'static UsbShared,
     statics: &'static UsbStatics,
-    regs: pac::USBCTRL_REGS,
-    dpram: pac::USBCTRL_DPRAM,
+    regs: pac::USB,
+    dpram: pac::USB_DPRAM,
 }
 
 impl Rp2040HostController {
@@ -782,8 +782,8 @@ impl Rp2040HostController {
     /// See rp2040-usb-otge100.rs for a complete working example.
     pub fn new(
         resets: &mut pac::RESETS,
-        regs: pac::USBCTRL_REGS,
-        dpram: pac::USBCTRL_DPRAM,
+        regs: pac::USB,
+        dpram: pac::USB_DPRAM,
         shared: &'static UsbShared,
         statics: &'static UsbStatics,
     ) -> Self {
@@ -811,8 +811,8 @@ impl Rp2040HostController {
         });
 
         unsafe {
-            pac::NVIC::unpend(pac::Interrupt::USBCTRL_IRQ);
-            pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
+            cortex_m::peripheral::NVIC::unpend(pac::Interrupt::USBCTRL_IRQ);
+            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
         }
 
         regs.inte().write(|w| w.host_conn_dis().set_bit());
@@ -1245,8 +1245,8 @@ impl Rp2040HostController {
         interval_ms: u8,
     ) -> Rp2040InterruptPipe {
         let n = pipe.which();
-        let regs = unsafe { pac::USBCTRL_REGS::steal() };
-        let dpram = unsafe { pac::USBCTRL_DPRAM::steal() };
+        let regs = unsafe { pac::USB::steal() };
+        let dpram = unsafe { pac::USB_DPRAM::steal() };
         regs.host_addr_endp((n - 1) as usize).write(|w| unsafe {
             w.address()
                 .bits(address)
