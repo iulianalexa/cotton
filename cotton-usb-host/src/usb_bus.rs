@@ -416,7 +416,7 @@ impl<HC: HostController> Stream for HubStateStream<'_, HC> {
 /// object for each of them.
 ///
 pub struct UsbBus<HC: HostController> {
-    driver: HC,
+    pub driver: HC,
 }
 
 impl<HC: HostController> UsbBus<HC> {
