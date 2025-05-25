@@ -217,6 +217,7 @@ pub trait HostController {
         packet_size: u8,
         setup: SetupPacket,
         data_phase: DataPhase<'_>,
+        needs_pream: bool,
     ) -> impl core::future::Future<Output = Result<usize, UsbError>>;
 
     /// Perform a USB bulk in transfer
@@ -232,6 +233,7 @@ pub trait HostController {
         address: u8,
         endpoint: u8,
         packet_size: u16,
+        needs_pream: bool,
         data: &mut [u8],
         transfer_type: TransferType,
         data_toggle: &Cell<bool>,
@@ -250,6 +252,7 @@ pub trait HostController {
         address: u8,
         endpoint: u8,
         packet_size: u16,
+        needs_pream: bool,
         data: &[u8],
         transfer_type: TransferType,
         data_toggle: &Cell<bool>,
@@ -270,6 +273,7 @@ pub trait HostController {
         endpoint: u8,
         max_packet_size: u16,
         interval_ms: u8,
+        needs_pream: bool,
     ) -> impl core::future::Future<Output = Self::InterruptPipe>;
 
     /// Allocate an interrupt pipe
@@ -287,6 +291,7 @@ pub trait HostController {
         endpoint: u8,
         max_packet_size: u16,
         interval_ms: u8,
+        needs_pream: bool,
     ) -> Result<Self::InterruptPipe, UsbError>;
 }
 

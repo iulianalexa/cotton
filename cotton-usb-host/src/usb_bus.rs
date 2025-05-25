@@ -12,7 +12,6 @@ use crate::wire::{
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use futures::future::FutureExt;
 use futures::{Future, Stream, StreamExt};
 
 pub use crate::host_controller::{
@@ -47,6 +46,7 @@ pub struct DeviceInfo {
 struct UnaddressedDevice {
     usb_speed: UsbSpeed,
     packet_size_ep0: u8,
+    needs_pream: bool
 }
 
 /// A USB device which is attached, and has an address, but isn't yet configured
@@ -64,6 +64,7 @@ pub struct UnconfiguredDevice {
     usb_address: u8,
     usb_speed: UsbSpeed,
     packet_size_ep0: u8,
+    needs_pream: bool
 }
 
 impl UnconfiguredDevice {
@@ -87,6 +88,7 @@ pub struct BulkIn {
     usb_speed: UsbSpeed,
     endpoint: u8,
     data_toggle: Cell<bool>,
+    needs_pream: bool
 }
 
 /// A Bulk OUT endpoint on a particular USB device
@@ -100,6 +102,7 @@ pub struct BulkOut {
     usb_speed: UsbSpeed,
     endpoint: u8,
     data_toggle: Cell<bool>,
+    needs_pream: bool,
 }
 
 /// A USB device which is attached, addressed, configured, and ready to use
@@ -116,6 +119,7 @@ pub struct UsbDevice {
     packet_size_ep0: u8,
     in_endpoints_bitmap: u16,
     out_endpoints_bitmap: u16,
+    needs_pream: bool
 }
 
 impl UsbDevice {
@@ -152,6 +156,7 @@ impl UsbDevice {
                 usb_speed: self.usb_speed,
                 endpoint: ep,
                 data_toggle: Cell::new(false),
+                needs_pream: self.needs_pream
             })
         } else {
             Err(UsbError::NoSuchEndpoint)
@@ -173,6 +178,7 @@ impl UsbDevice {
                 usb_speed: self.usb_speed,
                 endpoint: ep,
                 data_toggle: Cell::new(false),
+                needs_pream: self.needs_pream
             })
         } else {
             Err(UsbError::NoSuchEndpoint)
@@ -335,6 +341,7 @@ impl DescriptorVisitor for SpecificConfiguration {
 pub struct HubState<HC: HostController> {
     topology: RefCell<Topology>,
     pipes: RefCell<[Option<HC::InterruptPipe>; 15]>,
+    root_speed: RefCell<Option<UsbSpeed>>
 }
 
 impl<HC: HostController> Default for HubState<HC> {
@@ -342,6 +349,7 @@ impl<HC: HostController> Default for HubState<HC> {
         Self {
             topology: Default::default(),
             pipes: Default::default(),
+            root_speed: Default::default()
         }
     }
 }
@@ -372,6 +380,7 @@ impl<HC: HostController> HubState<HC> {
                     endpoint,
                     max_packet_size as u16,
                     interval_ms,
+                    self.topology().needs_pream(address).unwrap()
                 )?);
                 return Ok(());
             }
@@ -507,7 +516,7 @@ impl<HC: HostController> UsbBus<HC> {
                             self.driver.reset_root_port(false);
                             delay_ms(10).await;
                             let (device, info) =
-                                match self.new_device(speed).await {
+                                match self.new_device(speed, None).await {
                                     Ok((device, info)) => (device, info),
                                     Err(e) => {
                                         return DeviceEvent::EnumerationError(
@@ -519,7 +528,7 @@ impl<HC: HostController> UsbBus<HC> {
                             let address = hub_state
                                 .topology
                                 .borrow_mut()
-                                .device_connect(0, 1, is_hub)
+                                .device_connect(0, 1, is_hub, false)
                                 .expect("Root connect should always succeed");
                             let device = match self
                                 .set_address(device, address)
@@ -536,6 +545,10 @@ impl<HC: HostController> UsbBus<HC> {
                                 debug::println!("It's a hub");
                                 match self.new_hub(hub_state, device).await {
                                     Ok(device) => {
+                                        let mut root_speed = hub_state.root_speed.borrow_mut();
+                                        if let None = *root_speed {
+                                            *root_speed = Some(device.usb_speed);
+                                        }
                                         return DeviceEvent::HubConnect(device)
                                     }
                                     Err(e) => {
@@ -547,6 +560,7 @@ impl<HC: HostController> UsbBus<HC> {
                             }
                             DeviceEvent::Connect(device, info)
                         } else {
+                            *hub_state.root_speed.borrow_mut() = None;
                             hub_state
                                 .topology
                                 .borrow_mut()
@@ -623,7 +637,7 @@ impl<HC: HostController> UsbBus<HC> {
                     delay_ms(50).await;
                     self.driver.reset_root_port(false);
                     delay_ms(10).await;
-                    match self.new_device(speed).await {
+                    match self.new_device(speed, None).await {
                         Ok((device, info)) => match self
                             .set_address(device, 1)
                             .await
@@ -661,6 +675,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 0,
                 },
                 DataPhase::None,
+                device.needs_pream
             )
             .await?;
         let mut endpoints = SpecificConfiguration::new(configuration_value);
@@ -671,14 +686,24 @@ impl<HC: HostController> UsbBus<HC> {
             packet_size_ep0: device.packet_size_ep0,
             in_endpoints_bitmap: endpoints.in_endpoints,
             out_endpoints_bitmap: endpoints.out_endpoints,
+            needs_pream: device.needs_pream
         })
     }
 
     async fn new_device(
         &self,
         speed: UsbSpeed,
+        hub_speed: Option<UsbSpeed>
     ) -> Result<(UnaddressedDevice, DeviceInfo), UsbError> {
         // Read prefix of device descriptor
+        let needs_pream = if let None = hub_speed {
+            false
+        } else if let Some(UsbSpeed::Low1_5) = hub_speed {
+            false
+        } else {
+            true
+        };
+
         let mut descriptors = [0u8; 18];
         let sz = self
             .driver
@@ -693,6 +718,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 8,
                 },
                 DataPhase::In(&mut descriptors),
+                needs_pream
             )
             .await?;
         if sz < 8 {
@@ -716,6 +742,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 18,
                 },
                 DataPhase::In(&mut descriptors),
+                needs_pream
             )
             .await?;
         if sz < 18 {
@@ -730,6 +757,7 @@ impl<HC: HostController> UsbBus<HC> {
             UnaddressedDevice {
                 usb_speed: speed,
                 packet_size_ep0,
+                needs_pream
             },
             DeviceInfo {
                 vid,
@@ -757,12 +785,14 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 0,
                 },
                 DataPhase::None,
+                device.needs_pream
             )
             .await?;
         Ok(UnconfiguredDevice {
             usb_address: address,
             usb_speed: device.usb_speed,
             packet_size_ep0: device.packet_size_ep0,
+            needs_pream: device.needs_pream
         })
     }
 
@@ -811,6 +841,7 @@ impl<HC: HostController> UsbBus<HC> {
                 device.packet_size_ep0,
                 setup,
                 data_phase,
+                device.needs_pream
             )
             .await
     }
@@ -835,6 +866,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 0,
                 },
                 DataPhase::None,
+                ep.needs_pream
             )
             .await?;
         ep.data_toggle.set(false); // USB 2.0 s5.8.5
@@ -862,6 +894,7 @@ impl<HC: HostController> UsbBus<HC> {
             ep.usb_address,
             ep.endpoint,
             64, // @TODO max packet size
+            ep.needs_pream,
             data,
             transfer_type,
             &ep.data_toggle,
@@ -890,6 +923,7 @@ impl<HC: HostController> UsbBus<HC> {
             ep.usb_address,
             ep.endpoint,
             64, // @TODO max packet size
+            ep.needs_pream,
             data,
             transfer_type,
             &ep.data_toggle,
@@ -903,21 +937,23 @@ impl<HC: HostController> UsbBus<HC> {
     ///  - endpoint: endpoint number (1-15)
     ///  - max_packet_size: maximum expected packet size, in bytes
     ///  - interval_ms: polling interval, in milliseconds
-    pub fn interrupt_endpoint_in(
-        &self,
+    ///  - hub_state: hub state reference
+    pub async fn interrupt_endpoint_in<'a, 'b>(
+        &'a self,
         address: u8,
         endpoint: u8,
         max_packet_size: u16,
         interval_ms: u8,
-    ) -> impl Stream<Item = InterruptPacket> + '_ {
+        hub_state: &'b HubState<HC>
+    ) -> HC::InterruptPipe {
         self.driver
             .alloc_interrupt_pipe(
                 address,
                 endpoint,
                 max_packet_size,
                 interval_ms,
-            )
-            .flatten_stream()
+                hub_state.topology().needs_pream(address).unwrap()
+            ).await
     }
 
     /// Fetch configuration descriptors and report them via a callback
@@ -956,6 +992,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 9,
                 },
                 DataPhase::In(&mut buf),
+                device.needs_pream
             )
             .await?;
 
@@ -976,6 +1013,7 @@ impl<HC: HostController> UsbBus<HC> {
                             wLength: total_length as u16,
                         },
                         DataPhase::In(&mut buf),
+                        device.needs_pream
                     )
                     .await?;
             } else {
@@ -1036,6 +1074,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 64,
                 },
                 DataPhase::In(&mut descriptors),
+                device.needs_pream
             )
             .await?;
 
@@ -1048,7 +1087,7 @@ impl<HC: HostController> UsbBus<HC> {
 
         // Ports are numbered from 1..=N (not 0..N)
         for port in 1..=ports {
-            self.set_port_feature(device.address(), port, PORT_POWER)
+            self.set_port_feature(device.address(), port, PORT_POWER, hub_state)
                 .await?;
         }
 
@@ -1059,6 +1098,7 @@ impl<HC: HostController> UsbBus<HC> {
         &self,
         hub_address: u8,
         port: u8,
+        hub_state: &HubState<HC>,
     ) -> Result<(u16, u16), UsbError> {
         let mut data = [0u8; 4];
         self.driver
@@ -1075,6 +1115,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 4,
                 },
                 DataPhase::In(&mut data),
+                hub_state.topology().needs_pream(hub_address).unwrap()
             )
             .await?;
 
@@ -1091,6 +1132,7 @@ impl<HC: HostController> UsbBus<HC> {
         hub_address: u8,
         port: u8,
         feature: u16,
+        hub_state: &HubState<HC>
     ) -> Result<(), UsbError> {
         self.driver
             .control_transfer(
@@ -1106,6 +1148,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 0,
                 },
                 DataPhase::None,
+                hub_state.topology().needs_pream(hub_address).unwrap()
             )
             .await?;
         Ok(())
@@ -1116,6 +1159,7 @@ impl<HC: HostController> UsbBus<HC> {
         hub_address: u8,
         port: u8,
         feature: u16,
+        hub_state: &HubState<HC>
     ) -> Result<(), UsbError> {
         self.driver
             .control_transfer(
@@ -1131,6 +1175,7 @@ impl<HC: HostController> UsbBus<HC> {
                     wLength: 0,
                 },
                 DataPhase::None,
+                hub_state.topology().needs_pream(hub_address).unwrap()
             )
             .await?;
         Ok(())
@@ -1171,7 +1216,7 @@ impl<HC: HostController> UsbBus<HC> {
             debug::println!("I'm told to investigate port {}", port);
 
             let (state, changes) =
-                self.get_hub_port_status(packet.address, port).await?;
+                self.get_hub_port_status(packet.address, port, hub_state).await?;
             debug::println!(
                 "  port {} status3 {:x} {:x}",
                 port,
@@ -1189,6 +1234,7 @@ impl<HC: HostController> UsbBus<HC> {
                         packet.address,
                         port,
                         (bit + 16) as u16,
+                        hub_state
                     )
                     .await?;
                 }
@@ -1205,13 +1251,13 @@ impl<HC: HostController> UsbBus<HC> {
                     }
 
                     // now connected
-                    self.set_port_feature(packet.address, port, PORT_RESET)
+                    self.set_port_feature(packet.address, port, PORT_RESET, hub_state)
                         .await?;
 
                     delay_ms(50).await;
 
                     let (state, _changes) =
-                        self.get_hub_port_status(packet.address, port).await?;
+                        self.get_hub_port_status(packet.address, port, hub_state).await?;
 
                     if (state & 2) != 0 {
                         // port is now ENABLED i.e. operational
@@ -1223,12 +1269,12 @@ impl<HC: HostController> UsbBus<HC> {
                             _ => UsbSpeed::Low1_5,
                         };
 
-                        let (device, info) = self.new_device(speed).await?;
+                        let (device, info) = self.new_device(speed, *hub_state.root_speed.borrow()).await?;
                         let is_hub = info.class == HUB_CLASSCODE;
                         let address = hub_state
                             .topology
                             .borrow_mut()
-                            .device_connect(packet.address, port, is_hub)
+                            .device_connect(packet.address, port, is_hub, device.needs_pream)
                             .ok_or(UsbError::TooManyDevices)?;
                         let device = self.set_address(device, address).await?;
                         if is_hub {
@@ -1263,6 +1309,7 @@ pub unsafe fn create_test_device(
         packet_size_ep0: 64,
         in_endpoints_bitmap,
         out_endpoints_bitmap,
+        needs_pream: false
     }
 }
 

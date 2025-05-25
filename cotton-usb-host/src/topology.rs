@@ -19,6 +19,7 @@ const MAX_HUBS: u8 = 16;
 #[derive(Default, Clone)]
 pub struct Topology {
     parent: [u8; MAX_DEVICES as usize],
+    needs_pream: [bool; MAX_DEVICES as usize]
 }
 
 #[cfg(feature = "std")]
@@ -97,12 +98,21 @@ impl defmt::Format for Topology {
 impl Topology {
     /// Create a new Topology object representing an empty bus (0 devices)
     pub fn new() -> Self {
-        Self { parent: [0u8; 32] }
+        Self { parent: [0u8; 32], needs_pream: [false; 32] }
     }
 
     /// Is this USB device address believed present on the bus?
     pub fn is_present(&self, device: u8) -> bool {
         self.parent.get(device as usize).is_some_and(|x| *x > 0)
+    }
+
+    /// Check if needs preamble. Returns None if device is not present on the bus.
+    pub fn needs_pream(&self, device: u8) -> Option<bool> {
+        if !self.is_present(device) {
+            return None;
+        }
+
+        return Some(self.needs_pream[device as usize]);
     }
 
     /// A new USB device has been connected
@@ -111,6 +121,7 @@ impl Topology {
     ///  - parent_hub: USB device address of parent hub (0 if attached to root)
     ///  - parent_port: Port number (1-based) on parent hub
     ///  - is_hub: Is this device itself a hub?
+    ///  - needs_pream: Needs preamble.
     ///
     /// Returns `Some(N)` if the device is to be given USB device address `N`,
     /// or `None` if the limit of attached devices has already been reached.
@@ -119,6 +130,7 @@ impl Topology {
         parent_hub: u8,
         parent_port: u8,
         is_hub: bool,
+        needs_pream: bool,
     ) -> Option<u8> {
         if parent_hub >= MAX_HUBS || parent_port >= MAX_PORTS {
             return None;
@@ -139,6 +151,7 @@ impl Topology {
             for i in (1..MAX_DEVICES).rev() {
                 if !self.is_present(i) {
                     self.parent[i as usize] = entry;
+                    self.needs_pream[i as usize] = needs_pream;
                     return Some(i);
                 }
             }

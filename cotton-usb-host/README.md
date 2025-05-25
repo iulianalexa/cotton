@@ -6,6 +6,27 @@
 [![docs.rs](https://img.shields.io/docsrs/cotton-usb-host)](https://docs.rs/cotton-usb-host/latest/cotton_usb_host/)
 [![License: CC0-1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg)](http://creativecommons.org/publicdomain/zero/1.0/)
 
+# Fork
+
+This is a fork.
+
+It implements the host controller for RP235x, using a patched version of [rp235x-pac](https://github.com/iulianalexa/rp235x-pac).
+
+Some additional changes were made, including:
+- Turned `UsbBus::interrupt_endpoint_in` into an async function.
+  - Before this, it took a stream future and flattened it into a stream. This was an opaque type that was impossible to store for later use in embedded situations.
+- `UsbBus::interrupt_endpoint_in` now needs an additional parameter, a reference to the `HubState`
+  - Why...? Because:
+- Added support for LS (Low Speed) devices running through FS (Full Speed) hubs!
+  - Previously, LS devices worked as a root device, but connecting them through a FS hub would result in a timeout error.
+  - Before this, I did not have much knowledge on the USB spec.
+  - After some tests (figured out that it is not a hardware issue, as TinyUSB works fine, and also that it must be a speed issue, because FS devices can be detected through the hub), debugging, and reading through the [RP235x Datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf), I found that in such situations a special preamble must be sent!
+    - This preamble is sent automatically by the USB controller when setting the `INTEP_PREAMBLE` bit in the `ADDR_ENDP` register of each relevant interrupt endpoint (see page 1158), as well as the `PREAMBLE_EN` bit in the `SIE_CTRL` register every time communication happens to a relevant device (see page 1160).
+      - These bits must be unset in all other scenarios! Therefore, at all times it is necessary to know which devices need a preamble.
+      - Also see the TinyUSB implementation: [here](https://github.com/hathach/tinyusb/blob/8f077f9295838d6a7e7a5151cb46605df14a630d/src/portable/raspberrypi/rp2040/hcd_rp2040.c#L361) and [here](https://github.com/hathach/tinyusb/blob/8f077f9295838d6a7e7a5151cb46605df14a630d/src/portable/raspberrypi/rp2040/hcd_rp2040.c#L581).
+      
+Because of these changes, unit tests as well as the RP2040 host controller implementation are now broken. Bringing them back should not be very difficult though.
+
 # cotton-usb-host
 
 Part of the [Cotton](https://github.com/pdh11/cotton) project.
